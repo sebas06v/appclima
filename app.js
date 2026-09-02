@@ -1,7 +1,11 @@
-/* AppClima — cliente de la API de Open-Meteo (https://open-meteo.com/en/docs) */
+/* AppClima — frontend. Consume Open-Meteo (https://open-meteo.com/en/docs)
+   a través del proxy propio expuesto en server.js. */
 
-const GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search";
-const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
+/* La app NO llama a Open-Meteo directamente: pasa por el proxy del servidor
+   (server.js), que es quien guarda la API key en variables de ambiente. */
+const API_CLIMA = "/api/clima";
+const API_GEOCODE = "/api/geocode";
+const TIMEOUT_MS = 12000;
 
 // Códigos WMO usados por Open-Meteo -> [descripción, icono, tipo de fondo]
 const WMO = {
@@ -54,21 +58,58 @@ let unidad = localStorage.getItem("appclima:unidad") || "celsius";
 let ubicacion = null;      // { lat, lon, nombre }
 let debounceId = null;
 let indiceActivo = -1;
+// Contadores para descartar respuestas que llegan tarde y ya no corresponden
+// a lo último que pidió el usuario.
+let peticionClima = 0;
+let peticionBusqueda = 0;
 
 /* ---------- Utilidades ---------- */
 
-function mostrarEstado(msg, esError = false) {
-  el.status.textContent = msg;
+/** Pinta un mensaje en la barra de estado, con botón de reintentar opcional. */
+function mostrarEstado(msg, esError = false, reintentar = null) {
+  el.status.textContent = "";
+  const texto = document.createElement("span");
+  texto.textContent = msg;
+  el.status.appendChild(texto);
+
+  if (reintentar) {
+    const btn = document.createElement("button");
+    btn.className = "retry";
+    btn.type = "button";
+    btn.textContent = "Reintentar";
+    btn.addEventListener("click", reintentar);
+    el.status.appendChild(btn);
+  }
+
   el.status.classList.toggle("error", esError);
   el.status.hidden = false;
 }
 function ocultarEstado() { el.status.hidden = true; }
 
-async function pedirJSON(url) {
-  const res = await fetch(url);
+/**
+ * Pide JSON al backend con timeout y traduce cualquier fallo a un mensaje
+ * entendible: nunca se muestra al usuario un error crudo del navegador.
+ */
+async function pedirJSON(url, timeoutMs = TIMEOUT_MS) {
+  const control = new AbortController();
+  const temporizador = setTimeout(() => control.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(url, { signal: control.signal });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      throw new Error("La consulta tardó demasiado. Revisa tu conexión e inténtalo de nuevo.");
+    }
+    throw new Error("No hay conexión con el servidor. Comprueba tu red e inténtalo de nuevo.");
+  } finally {
+    clearTimeout(temporizador);
+  }
+
   const data = await res.json().catch(() => null);
   if (!res.ok || (data && data.error)) {
-    throw new Error((data && data.reason) || `Error HTTP ${res.status}`);
+    // El backend envía { error, codigo, mensaje } ya traducido.
+    throw new Error((data && data.mensaje) || `El servidor respondió con un error (HTTP ${res.status}).`);
   }
   return data;
 }
@@ -96,20 +137,26 @@ function rumbo(grados) {
 /* ---------- Geocodificación (buscar ciudad) ---------- */
 
 async function buscarCiudades(nombre) {
-  const url = `${GEOCODING_URL}?name=${encodeURIComponent(nombre)}&count=8&language=es&format=json`;
-  const data = await pedirJSON(url);
+  const data = await pedirJSON(`${API_GEOCODE}?q=${encodeURIComponent(nombre)}`);
   return data.results || [];
 }
 
-function pintarSugerencias(lista) {
+function pintarSugerencias(lista, termino = "") {
   indiceActivo = -1;
-  if (!lista.length) { el.sug.hidden = true; el.sug.innerHTML = ""; return; }
+
+  // Sin coincidencias: se avisa en el desplegable en vez de dejarlo en blanco.
+  if (!lista.length) {
+    el.sug.innerHTML = `<li class="vacio">No encontramos ninguna ubicación para "${termino}". Revisa la ortografía o usa las coordenadas.</li>`;
+    el.sug.hidden = false;
+    return;
+  }
+
   el.sug.innerHTML = lista.map((c, i) => {
     const detalle = [c.admin1, c.country].filter(Boolean).join(", ");
     return `<li data-i="${i}"><strong>${c.name}</strong> <span class="sub">${detalle} · ${c.latitude.toFixed(2)}, ${c.longitude.toFixed(2)}</span></li>`;
   }).join("");
   el.sug.hidden = false;
-  el.sug.querySelectorAll("li").forEach((li) => {
+  el.sug.querySelectorAll("li[data-i]").forEach((li) => {
     li.addEventListener("click", () => elegirCiudad(lista[+li.dataset.i]));
   });
 }
@@ -126,29 +173,21 @@ function elegirCiudad(c) {
 async function cargarClima(loc) {
   ubicacion = loc;
   localStorage.setItem("appclima:ubicacion", JSON.stringify(loc));
-  mostrarEstado("Consultando Open-Meteo…");
+  mostrarEstado("Consultando el clima…");
 
-  const params = new URLSearchParams({
-    latitude: loc.lat,
-    longitude: loc.lon,
-    current: "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m",
-    hourly: "temperature_2m,precipitation_probability,weather_code",
-    daily: "weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_sum,precipitation_probability_max,wind_speed_10m_max",
-    timezone: "auto",
-    forecast_days: "7",
-    temperature_unit: unidad,
-    wind_speed_unit: "kmh",
-    precipitation_unit: "mm",
-  });
+  const miPeticion = ++peticionClima;
+  const params = new URLSearchParams({ lat: loc.lat, lon: loc.lon, unidad });
 
   try {
-    const data = await pedirJSON(`${FORECAST_URL}?${params}`);
+    const data = await pedirJSON(`${API_CLIMA}?${params}`);
+    if (miPeticion !== peticionClima) return;   // llegó tarde: ya hay otra consulta en curso
     pintarClima(data, loc);
     ocultarEstado();
     el.result.hidden = false;
   } catch (e) {
+    if (miPeticion !== peticionClima) return;
     el.result.hidden = true;
-    mostrarEstado(`No se pudo obtener el clima: ${e.message}`, true);
+    mostrarEstado(e.message, true, () => cargarClima(loc));
   }
 }
 
@@ -269,16 +308,21 @@ el.q.addEventListener("input", () => {
   const v = el.q.value.trim();
   if (v.length < 2) { el.sug.hidden = true; return; }
   debounceId = setTimeout(async () => {
+    const miBusqueda = ++peticionBusqueda;
     try {
-      pintarSugerencias(await buscarCiudades(v));
+      const lista = await buscarCiudades(v);
+      if (miBusqueda !== peticionBusqueda) return;  // el usuario ya escribió otra cosa
+      pintarSugerencias(lista, v);
     } catch (e) {
-      mostrarEstado(`Error al buscar la ciudad: ${e.message}`, true);
+      if (miBusqueda !== peticionBusqueda) return;
+      el.sug.hidden = true;
+      mostrarEstado(`No se pudo buscar la ubicación: ${e.message}`, true);
     }
   }, 300);
 });
 
 el.q.addEventListener("keydown", (ev) => {
-  const items = [...el.sug.querySelectorAll("li")];
+  const items = [...el.sug.querySelectorAll("li[data-i]")];
   if (!items.length || el.sug.hidden) return;
   if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
     ev.preventDefault();

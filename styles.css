@@ -201,3 +201,22 @@ input:focus { border-color: var(--accent); }
   .temp { font-size: 2.6rem; }
   .icon { font-size: 3rem; }
 }
+
+/* Barra de estado: mensaje + botón de reintentar */
+.status { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.status .retry {
+  flex: 0 0 auto;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.status .retry:hover { background: rgba(255, 255, 255, 0.2); }
+
+/* Búsqueda sin coincidencias */
+.suggestions .vacio { color: var(--muted); font-size: 0.88rem; cursor: default; line-height: 1.4; }
+.suggestions .vacio:hover { background: transparent; }
