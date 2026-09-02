@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AppClima · Open-Meteo</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⛅</text></svg>" />
+</head>
+<body>
+  <div class="bg" id="bg"></div>
+
+  <header class="topbar">
+    <h1 class="brand">⛅ AppClima</h1>
+    <div class="units">
+      <button class="unit-btn is-active" data-unit="celsius">°C</button>
+      <button class="unit-btn" data-unit="fahrenheit">°F</button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- Búsqueda -->
+    <section class="panel search-panel">
+      <div class="search-row">
+        <div class="field grow">
+          <label for="q">Buscar ciudad</label>
+          <input id="q" type="text" placeholder="Ej. Bogotá, Madrid, Lima…" autocomplete="off" />
+          <ul id="suggestions" class="suggestions" hidden></ul>
+        </div>
+        <button id="btn-geo" class="btn ghost" title="Usar mi ubicación actual">📍 Mi ubicación</button>
+      </div>
+
+      <details class="manual">
+        <summary>Introducir coordenadas manualmente</summary>
+        <div class="search-row">
+          <div class="field">
+            <label for="lat">Latitud</label>
+            <input id="lat" type="number" step="0.0001" min="-90" max="90" placeholder="4.6097" />
+          </div>
+          <div class="field">
+            <label for="lon">Longitud</label>
+            <input id="lon" type="number" step="0.0001" min="-180" max="180" placeholder="-74.0817" />
+          </div>
+          <button id="btn-coords" class="btn">Consultar</button>
+        </div>
+      </details>
+    </section>
+
+    <div id="status" class="status" hidden></div>
+
+    <!-- Resultado -->
+    <section id="result" hidden>
+      <section class="panel current">
+        <div class="current-head">
+          <div>
+            <h2 id="place">—</h2>
+            <p id="coords" class="muted"></p>
+          </div>
+          <p id="updated" class="muted small"></p>
+        </div>
+
+        <div class="current-body">
+          <div class="temp-block">
+            <span id="icon" class="icon">⛅</span>
+            <div>
+              <p id="temp" class="temp">—</p>
+              <p id="desc" class="desc">—</p>
+              <p id="feels" class="muted small"></p>
+            </div>
+          </div>
+
+          <ul class="metrics">
+            <li><span class="k">Humedad</span><span class="v" id="m-hum">—</span></li>
+            <li><span class="k">Viento</span><span class="v" id="m-wind">—</span></li>
+            <li><span class="k">Ráfagas</span><span class="v" id="m-gust">—</span></li>
+            <li><span class="k">Precipitación</span><span class="v" id="m-prec">—</span></li>
+            <li><span class="k">Presión</span><span class="v" id="m-press">—</span></li>
+            <li><span class="k">Nubosidad</span><span class="v" id="m-cloud">—</span></li>
+            <li><span class="k">Amanecer</span><span class="v" id="m-sunrise">—</span></li>
+            <li><span class="k">Atardecer</span><span class="v" id="m-sunset">—</span></li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>Próximas 24 horas</h3>
+        <div id="chart" class="chart"></div>
+        <div id="hourly" class="hourly"></div>
+      </section>
+
+      <section class="panel">
+        <h3>Pronóstico de 7 días</h3>
+        <div id="daily" class="daily"></div>
+      </section>
+    </section>
+  </main>
+
+  <footer class="foot">
+    Datos meteorológicos de <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> (CC BY 4.0)
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

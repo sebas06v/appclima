@@ -1,0 +1,9 @@
+{
+  "name": "appclima",
+  "version": "1.0.0",
+  "description": "App de clima que consulta la API de Open-Meteo por latitud/longitud",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  }
+}
