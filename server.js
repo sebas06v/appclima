@@ -299,9 +299,19 @@ async function rutaGoogleCallback(req, url, res) {
   }
 }
 
-/** Le dice al frontend qué métodos de acceso están disponibles. */
+/**
+ * Estado de la configuración del servidor. Sirve para dos cosas: que el frontend
+ * sepa si mostrar el botón de Google, y para diagnosticar un despliegue sin
+ * entrar a los logs. Solo dice SI cada cosa está configurada, nunca su valor.
+ */
 function rutaConfig(res) {
-  enviarJSON(res, 200, { google: google.configurado() });
+  enviarJSON(res, 200, {
+    google: google.configurado(),
+    // "resend" = los correos salen de verdad; "consola" = solo se imprimen en el log.
+    correo: correo.proveedor(),
+    // Sin SESSION_SECRET las sesiones se pierden en cada reinicio del servidor.
+    sesionPersistente: Boolean(process.env.SESSION_SECRET),
+  });
 }
 
 /* ---------- Endpoints: clima ---------- */
