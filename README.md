@@ -8,13 +8,13 @@ El usuario puede introducir latitud y longitud, buscar una ubicación por nombre
 la geolocalización del navegador.
 
 Arquitectura **frontend + backend**: el navegador nunca llama a servicios externos
-directamente, así que las API keys viven únicamente en el servidor, en variables de ambiente.
+directamente, así que las credenciales viven únicamente en el servidor, en variables de ambiente.
 
 ```
 navegador  →  backend (server.js)  →  Open-Meteo      (clima)
                     │                └─ OPEN_METEO_API_KEY
-                    ├──────────────→  Resend          (correo de bienvenida)
-                    │                 └─ RESEND_API_KEY
+                    ├──────────────→  Gmail SMTP      (correo de bienvenida)
+                    │                 └─ GMAIL_APP_PASSWORD   (o Resend)
                     └──────────────→  Google OAuth    (acceso con Google)
                                       └─ GOOGLE_CLIENT_SECRET
 ```
@@ -28,7 +28,8 @@ npm start               # o: node server.js
 
 Abre http://localhost:3000 — te llevará a la pantalla de acceso.
 
-Sin dependencias externas: solo Node.js (>= 20.12, por `process.loadEnvFile`).
+Node.js >= 20.12 (por `process.loadEnvFile`). Una única dependencia, `nodemailer`, usada
+solo para el envío por SMTP de Gmail.
 
 ## Autenticación
 
@@ -104,12 +105,28 @@ añadidas como usuarios de prueba en la pantalla de consentimiento.
 
 Es una **reacción automática al registro**, no un botón aparte.
 
-**Proveedor: [Resend](https://resend.com)** — API HTTPS, sin dependencias. La lógica está
-aislada en `correo.js`, así que cambiar a SendGrid o Nodemailer solo implica tocar ese archivo.
+**Tres proveedores**, aislados en `correo.js` y elegidos automáticamente según las variables
+de ambiente. Las credenciales nunca se escriben en el código.
 
-**La API key va en `RESEND_API_KEY`**, nunca en el código. Si no está definida, se usa el
-proveedor `consola`: el mensaje se imprime en el log del servidor en vez de enviarse, de modo
-que la app funciona igual recién clonada.
+| Proveedor | Se activa con | Destinatarios |
+|---|---|---|
+| `gmail` | `GMAIL_USER` + `GMAIL_APP_PASSWORD` | **Cualquiera.** SMTP de Gmail vía nodemailer. ~500 correos/día. |
+| `resend` | `RESEND_API_KEY` | Con el remitente de pruebas `onboarding@resend.dev`, **solo tu propia cuenta**; para escribir a cualquiera hay que verificar un dominio. |
+| `consola` | nada configurado | Ninguno: el mensaje se imprime en el log. La app funciona igual recién clonada. |
+
+Prioridad: Gmail → Resend → consola. Se puede forzar uno con `MAIL_PROVIDER=gmail|resend|consola`.
+
+### Configurar Gmail
+
+`GMAIL_APP_PASSWORD` **no** es la contraseña de la cuenta, sino una *contraseña de
+aplicación* de 16 caracteres:
+
+1. Activa la verificación en 2 pasos en https://myaccount.google.com/security
+2. Genera la contraseña en https://myaccount.google.com/apppasswords
+3. Ponla en `GMAIL_APP_PASSWORD` (los espacios se ignoran) y tu correo en `GMAIL_USER`.
+
+Gmail reescribe el remitente a la cuenta autenticada, así que `MAIL_FROM` se calcula solo
+a partir de `GMAIL_USER` si no lo defines.
 
 **Se dispara en el evento correcto.** En `rutaRegistro` (`server.js`) el orden es:
 
@@ -120,8 +137,8 @@ que la app funciona igual recién clonada.
 **El registro no espera al proveedor.** Como el envío va fuera del ciclo de respuesta, la
 latencia del correo no la sufre el usuario. Si el envío falla, se registra en el log y la
 cuenta sigue creada: un problema de correo nunca rompe un registro. `correo.js` reintenta
-3 veces con espera creciente ante errores temporales (429 y 5xx), y no reintenta ante errores
-de configuración (4xx), donde insistir no sirve de nada.
+3 veces con espera creciente ante errores temporales (429, 5xx, fallos de red), y no reintenta
+ante errores de configuración (4xx de Resend, `EAUTH` de Gmail), donde insistir no sirve de nada.
 
 ## Variables de ambiente
 
@@ -133,8 +150,11 @@ La plantilla versionada es `.env.example`.
 | `GOOGLE_CLIENT_ID` | *(vacía)* | ID de cliente de OAuth. Sin él, el botón de Google se oculta. |
 | `GOOGLE_CLIENT_SECRET` | *(vacía)* | Secreto de cliente de OAuth. Solo vive en el servidor. |
 | `GOOGLE_REDIRECT_URI` | `http://localhost:3000/api/auth/google/callback` | Debe coincidir exactamente con el registrado en Google Cloud. |
-| `RESEND_API_KEY` | *(vacía)* | API key de Resend. Sin ella los correos se imprimen en el log. |
-| `MAIL_FROM` | `AppClima <onboarding@resend.dev>` | Remitente del correo de bienvenida. |
+| `MAIL_PROVIDER` | *(automático)* | Fuerza el proveedor: `gmail`, `resend` o `consola`. |
+| `GMAIL_USER` | *(vacía)* | Cuenta de Gmail desde la que se envía. |
+| `GMAIL_APP_PASSWORD` | *(vacía)* | Contraseña de aplicación de 16 caracteres (no la de la cuenta). |
+| `RESEND_API_KEY` | *(vacía)* | API key de Resend. |
+| `MAIL_FROM` | *(según proveedor)* | Remitente del correo de bienvenida. |
 | `APP_URL` | `http://localhost:3000` | URL usada en los enlaces del correo. |
 | `MAIL_TIMEOUT_MS` | `10000` | Tiempo máximo de espera del proveedor de correo. |
 | `SESSION_SECRET` | *(temporal)* | Clave para firmar las cookies de sesión. |
@@ -150,9 +170,9 @@ Genera un `SESSION_SECRET` con:
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-> **Nota sobre el remitente**: `onboarding@resend.dev` funciona sin verificar dominio, pero
-> Resend solo permite enviarlo a la dirección con la que creaste la cuenta. Para escribir a
-> cualquier destinatario hay que verificar un dominio propio y ajustar `MAIL_FROM`.
+> **Nota**: con Resend y el remitente `onboarding@resend.dev` solo se puede enviar a la
+> dirección con la que creaste la cuenta. Por eso el proveedor por defecto para enviar a
+> cualquiera es Gmail.
 
 ## API del clima
 
@@ -220,7 +240,7 @@ Ambos validan la entrada, aplican caché y devuelven los errores con la forma:
 | `server.js` | rutas, proxy a Open-Meteo, caché y errores |
 | `auth.js` | usuarios, contraseñas y sesiones |
 | `google.js` | acceso con Google (OAuth 2.0) |
-| `correo.js` | proveedor de correo y plantilla de bienvenida |
+| `correo.js` | proveedores de correo (Gmail/Resend/consola) y plantilla de bienvenida |
 | `.env.example` | plantilla de variables de ambiente |
 
 Los `weather_code` son códigos WMO; la tabla de traducción está en la constante `WMO` de `app.js`.

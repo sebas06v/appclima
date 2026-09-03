@@ -1,13 +1,23 @@
 /*
  * AppClima — envío de correo.
  *
- * Proveedor: Resend (API HTTPS, sin dependencias). La API key se lee de la
- * variable de ambiente RESEND_API_KEY y NUNCA se escribe en el código.
+ * Tres proveedores, elegidos automáticamente según las variables de ambiente.
+ * Ninguna credencial se escribe nunca en el código.
  *
- * Si no hay API key configurada, se usa el proveedor "consola": la app sigue
- * funcionando y el correo se imprime en el log en vez de enviarse. Así el
- * registro nunca se rompe por un problema de configuración del correo.
+ *   gmail    GMAIL_USER + GMAIL_APP_PASSWORD  -> SMTP de Gmail (nodemailer).
+ *                                                Envía a CUALQUIER destinatario.
+ *   resend   RESEND_API_KEY                   -> API de Resend. Con el remitente
+ *                                                de pruebas onboarding@resend.dev
+ *                                                solo entrega a tu propia cuenta;
+ *                                                para escribir a cualquiera hay
+ *                                                que verificar un dominio.
+ *   consola  (nada configurado)               -> el mensaje se imprime en el log.
+ *                                                La app funciona igual.
+ *
+ * Se puede forzar uno con MAIL_PROVIDER=gmail|resend|consola.
  */
+const nodemailer = require("nodemailer");
+
 const RESEND_URL = "https://api.resend.com/emails";
 const INTENTOS = 3;
 const ESPERA_BASE_MS = 500;
@@ -15,16 +25,26 @@ const ESPERA_BASE_MS = 500;
 const espera = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function config() {
+  const gmailUser = process.env.GMAIL_USER || "";
   return {
     apiKey: process.env.RESEND_API_KEY || "",
-    remitente: process.env.MAIL_FROM || "AppClima <onboarding@resend.dev>",
+    gmailUser,
+    gmailPass: (process.env.GMAIL_APP_PASSWORD || "").replace(/\s/g, ""),
+    // Gmail reescribe el remitente a la cuenta autenticada, así que se usa esa.
+    remitente: process.env.MAIL_FROM || (gmailUser ? `AppClima <${gmailUser}>` : "AppClima <onboarding@resend.dev>"),
     urlApp: process.env.APP_URL || "http://localhost:3000",
     timeout: Number(process.env.MAIL_TIMEOUT_MS || 10000),
   };
 }
 
 function proveedor() {
-  return config().apiKey ? "resend" : "consola";
+  const forzado = (process.env.MAIL_PROVIDER || "").trim().toLowerCase();
+  if (forzado) return forzado;
+
+  const { gmailUser, gmailPass, apiKey } = config();
+  if (gmailUser && gmailPass) return "gmail";
+  if (apiKey) return "resend";
+  return "consola";
 }
 
 /* ---------- Plantilla del correo de bienvenida ---------- */
@@ -118,6 +138,50 @@ async function enviarConResend({ para, asunto, texto, html }) {
   return { id: datos && datos.id, proveedor: "resend" };
 }
 
+/* Transporte SMTP de Gmail, creado una sola vez y reutilizado. */
+let transporteGmail = null;
+
+function obtenerTransporteGmail() {
+  const { gmailUser, gmailPass, timeout } = config();
+  if (!transporteGmail) {
+    transporteGmail = nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      auth: { user: gmailUser, pass: gmailPass },
+      connectionTimeout: timeout,
+      greetingTimeout: timeout,
+      socketTimeout: timeout,
+    });
+  }
+  return transporteGmail;
+}
+
+async function enviarConGmail({ para, asunto, texto, html }) {
+  const { remitente } = config();
+
+  try {
+    const info = await obtenerTransporteGmail().sendMail({
+      from: remitente, to: para, subject: asunto, text: texto, html,
+    });
+    return { id: info.messageId, proveedor: "gmail" };
+  } catch (e) {
+    // Credenciales mal puestas: reintentar no arregla nada.
+    if (e.code === "EAUTH") {
+      const err = new Error(
+        "Gmail rechazó las credenciales. Revisa GMAIL_USER y que GMAIL_APP_PASSWORD " +
+        "sea una contraseña de aplicación de 16 caracteres (no la contraseña normal de tu cuenta)."
+      );
+      err.reintentable = false;
+      throw err;
+    }
+    // Fallos de red o de conexión: sí merece la pena reintentar.
+    const err = new Error(`No se pudo enviar por Gmail: ${e.message}`);
+    err.reintentable = true;
+    throw err;
+  }
+}
+
 function enviarPorConsola({ para, asunto, texto }) {
   const { remitente } = config();
   console.log("┌─ CORREO (proveedor: consola — no se envió de verdad) ───────────");
@@ -132,12 +196,15 @@ function enviarPorConsola({ para, asunto, texto }) {
 
 /** Envía un correo con reintentos. Lanza el error si agota los intentos. */
 async function enviar(mensaje) {
-  if (proveedor() === "consola") return enviarPorConsola(mensaje);
+  const cual = proveedor();
+  if (cual === "consola") return enviarPorConsola(mensaje);
+
+  const enviarCon = cual === "gmail" ? enviarConGmail : enviarConResend;
 
   let ultimo;
   for (let intento = 1; intento <= INTENTOS; intento++) {
     try {
-      return await enviarConResend(mensaje);
+      return await enviarCon(mensaje);
     } catch (e) {
       ultimo = e;
       const esUltimo = intento === INTENTOS;

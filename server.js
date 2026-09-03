@@ -430,9 +430,12 @@ http.createServer(async (req, res) => {
   console.log(API_KEY
     ? "Open-Meteo: API key detectada, usando los endpoints comerciales."
     : "Open-Meteo: sin API key (OPEN_METEO_API_KEY), usando los endpoints gratuitos.");
-  console.log(correo.proveedor() === "resend"
-    ? `Correo: Resend activo, remitente ${process.env.MAIL_FROM || "AppClima <onboarding@resend.dev>"}.`
-    : "Correo: sin RESEND_API_KEY, los mensajes se imprimen en este log en vez de enviarse.");
+  const mensajeCorreo = {
+    gmail: "Correo: SMTP de Gmail activo. Puede enviar a cualquier destinatario.",
+    resend: "Correo: Resend activo. Con onboarding@resend.dev solo entrega a tu propia cuenta.",
+    consola: "Correo: sin configurar, los mensajes se imprimen en este log en vez de enviarse.",
+  };
+  console.log(mensajeCorreo[correo.proveedor()] || `Correo: proveedor "${correo.proveedor()}" desconocido.`);
   console.log(google.configurado()
     ? "Google: acceso con Google activo."
     : "Google: sin GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET, el botón de Google queda oculto.");
