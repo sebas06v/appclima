@@ -106,12 +106,22 @@ async function pedirJSON(url, timeoutMs = TIMEOUT_MS) {
     clearTimeout(temporizador);
   }
 
+  // La sesión caducó o no existe: de vuelta a la pantalla de acceso.
+  if (res.status === 401) {
+    irALogin();
+    throw new Error("Tu sesión expiró. Vuelve a iniciar sesión.");
+  }
+
   const data = await res.json().catch(() => null);
   if (!res.ok || (data && data.error)) {
     // El backend envía { error, codigo, mensaje } ya traducido.
     throw new Error((data && data.mensaje) || `El servidor respondió con un error (HTTP ${res.status}).`);
   }
   return data;
+}
+
+function irALogin() {
+  window.location.replace("/login.html");
 }
 
 const info = (code) => WMO[code] || ["Desconocido", "❓", "cloud"];
@@ -366,10 +376,37 @@ document.querySelectorAll(".unit-btn").forEach((btn) => {
   });
 });
 
+/* ---------- Sesión ---------- */
+
+$("btn-salir").addEventListener("click", async () => {
+  try {
+    await fetch("/api/logout", { method: "POST" });
+  } catch (e) { /* aunque falle, se vuelve a la pantalla de acceso */ }
+  localStorage.removeItem("appclima:ubicacion");
+  irALogin();
+});
+
 /* ---------- Arranque ---------- */
 
-(function init() {
+(async function init() {
+  // Sin sesión válida no se carga nada: primero se comprueba quién eres.
+  let usuario;
+  try {
+    const res = await fetch("/api/sesion");
+    if (!res.ok) return irALogin();
+    usuario = (await res.json()).usuario;
+  } catch (e) {
+    document.body.classList.remove("comprobando-sesion");
+    return mostrarEstado("No hay conexión con el servidor. Recarga la página cuando vuelva.", true,
+      () => window.location.reload());
+  }
+
+  $("usuario-nombre").textContent = usuario.nombre;
+  $("usuario-nombre").title = usuario.email;
+  document.body.classList.remove("comprobando-sesion");
+
   document.querySelectorAll(".unit-btn").forEach((b) => b.classList.toggle("is-active", b.dataset.unit === unidad));
+
   const guardada = localStorage.getItem("appclima:ubicacion");
   if (guardada) {
     try {

@@ -5,3 +5,6 @@ node_modules/
 # Variables de ambiente: nunca subir credenciales al repositorio.
 .env
 .env.local
+
+# Base de datos local de usuarios (contiene hashes de contraseñas)
+data/

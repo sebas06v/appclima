@@ -10,6 +10,8 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const auth = require("./auth");
+const correo = require("./correo");
 
 /* ---------- Variables de ambiente ---------- */
 // Carga .env si existe (Node >= 20.12). La app funciona igual sin el archivo.
@@ -112,6 +114,29 @@ async function llamarOpenMeteo(url) {
   return { datos, cache: false };
 }
 
+/** Lee y parsea el cuerpo JSON de una petición, con límite de tamaño. */
+function leerCuerpo(req, maxBytes = 10_000) {
+  return new Promise((resolve, reject) => {
+    let datos = "";
+    req.on("data", (trozo) => {
+      datos += trozo;
+      if (datos.length > maxBytes) {
+        req.destroy();
+        reject(new ErrorAPI("El cuerpo de la petición es demasiado grande.", "CUERPO_GRANDE", 413));
+      }
+    });
+    req.on("end", () => {
+      if (!datos) return resolve({});
+      try {
+        resolve(JSON.parse(datos));
+      } catch (e) {
+        reject(new ErrorAPI("El cuerpo de la petición no es JSON válido.", "JSON_INVALIDO", 400));
+      }
+    });
+    req.on("error", () => reject(new ErrorAPI("Error al leer la petición.", "LECTURA", 400)));
+  });
+}
+
 function numeroEnRango(valor, min, max, nombre) {
   const n = Number(valor);
   if (valor === null || valor === "" || Number.isNaN(n)) {
@@ -123,7 +148,74 @@ function numeroEnRango(valor, min, max, nombre) {
   return n;
 }
 
-/* ---------- Endpoints ---------- */
+/* ---------- Endpoints: autenticación ---------- */
+
+/** Lanza 401 si la petición no trae una sesión válida. */
+function exigirSesion(req) {
+  const usuario = auth.usuarioDePeticion(req);
+  if (!usuario) {
+    throw new ErrorAPI("Necesitas iniciar sesión para consultar el clima.", "NO_AUTENTICADO", 401);
+  }
+  return usuario;
+}
+
+async function rutaRegistro(req, res) {
+  const cuerpo = await leerCuerpo(req);
+
+  const errores = auth.validarRegistro(cuerpo);
+  if (errores.length) {
+    throw new ErrorAPI(errores.join(" "), "DATOS_INVALIDOS", 400);
+  }
+  if (auth.buscarPorEmail(cuerpo.email)) {
+    throw new ErrorAPI("Ya existe una cuenta con ese correo. Inicia sesión.", "EMAIL_DUPLICADO", 409);
+  }
+
+  // 1) Se crea la cuenta y se persiste ANTES de responder.
+  const usuario = await auth.crearUsuario(cuerpo);
+
+  // 2) Se responde de inmediato: el usuario ya queda con sesión iniciada.
+  const cookie = auth.cookieSesion(auth.crearSesion(usuario), auth.DURACION_SESION_MS / 1000);
+  enviarJSON(res, 201, { usuario: auth.publico(usuario) }, { "Set-Cookie": cookie });
+
+  // 3) El correo de bienvenida sale DESPUÉS de responder y SIN await: es una
+  //    reacción al registro completado, y su latencia no afecta al usuario.
+  //    Si falla, correo.js lo registra en el log y la cuenta sigue creada.
+  setImmediate(() => { correo.enviarBienvenida(auth.publico(usuario)); });
+}
+
+async function rutaLogin(req, res) {
+  const cuerpo = await leerCuerpo(req);
+  const email = String(cuerpo.email || "").trim().toLowerCase();
+  const clave = `login:${email}`;
+
+  const minutos = auth.bloqueado(clave);
+  if (minutos) {
+    throw new ErrorAPI(`Demasiados intentos fallidos. Inténtalo en ${minutos} minuto(s).`, "BLOQUEADO", 429);
+  }
+
+  const usuario = auth.buscarPorEmail(email);
+  // Mensaje idéntico exista o no la cuenta: no se revela qué correos están registrados.
+  if (!usuario || !auth.verificarPassword(String(cuerpo.password || ""), usuario.password)) {
+    auth.registrarFallo(clave);
+    throw new ErrorAPI("Correo o contraseña incorrectos.", "CREDENCIALES", 401);
+  }
+
+  auth.limpiarIntentos(clave);
+  const cookie = auth.cookieSesion(auth.crearSesion(usuario), auth.DURACION_SESION_MS / 1000);
+  enviarJSON(res, 200, { usuario: auth.publico(usuario) }, { "Set-Cookie": cookie });
+}
+
+function rutaLogout(res) {
+  enviarJSON(res, 200, { ok: true }, { "Set-Cookie": auth.cookieSesion("", 0) });
+}
+
+function rutaSesion(req, res) {
+  const usuario = auth.usuarioDePeticion(req);
+  if (!usuario) throw new ErrorAPI("No hay sesión activa.", "NO_AUTENTICADO", 401);
+  enviarJSON(res, 200, { usuario: auth.publico(usuario) });
+}
+
+/* ---------- Endpoints: clima ---------- */
 
 async function rutaClima(params, res) {
   const lat = numeroEnRango(params.get("lat"), -90, 90, "lat");
@@ -194,16 +286,35 @@ function servirEstatico(ruta, res) {
 
 /* ---------- Servidor ---------- */
 
+// Método permitido por endpoint: sirve para distinguir un 404 de un 405.
+const RUTAS = {
+  "/api/registro": "POST",
+  "/api/login": "POST",
+  "/api/logout": "POST",
+  "/api/sesion": "GET",
+  "/api/clima": "GET",
+  "/api/geocode": "GET",
+};
+
 http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const ruta = decodeURIComponent(url.pathname);
 
   try {
     if (ruta.startsWith("/api/")) {
-      if (req.method !== "GET") throw new ErrorAPI("Método no permitido.", "METODO", 405);
-      if (ruta === "/api/clima") return await rutaClima(url.searchParams, res);
-      if (ruta === "/api/geocode") return await rutaGeocode(url.searchParams, res);
-      throw new ErrorAPI("Endpoint no encontrado.", "NO_ENCONTRADO", 404);
+      const metodo = RUTAS[ruta];
+      if (!metodo) throw new ErrorAPI("Endpoint no encontrado.", "NO_ENCONTRADO", 404);
+      if (metodo !== req.method) throw new ErrorAPI("Método no permitido.", "METODO", 405);
+
+      switch (ruta) {
+        case "/api/registro": return await rutaRegistro(req, res);
+        case "/api/login":    return await rutaLogin(req, res);
+        case "/api/logout":   return rutaLogout(res);
+        case "/api/sesion":   return rutaSesion(req, res);
+        // El clima queda detrás del login.
+        case "/api/clima":    exigirSesion(req); return await rutaClima(url.searchParams, res);
+        case "/api/geocode":  exigirSesion(req); return await rutaGeocode(url.searchParams, res);
+      }
     }
     servirEstatico(ruta, res);
   } catch (e) {
@@ -212,6 +323,12 @@ http.createServer(async (req, res) => {
 }).listen(PUERTO, () => {
   console.log(`AppClima en http://localhost:${PUERTO}`);
   console.log(API_KEY
-    ? "API key detectada: usando los endpoints comerciales de Open-Meteo."
-    : "Sin API key (OPEN_METEO_API_KEY): usando los endpoints gratuitos de Open-Meteo.");
+    ? "Open-Meteo: API key detectada, usando los endpoints comerciales."
+    : "Open-Meteo: sin API key (OPEN_METEO_API_KEY), usando los endpoints gratuitos.");
+  console.log(correo.proveedor() === "resend"
+    ? `Correo: Resend activo, remitente ${process.env.MAIL_FROM || "AppClima <onboarding@resend.dev>"}.`
+    : "Correo: sin RESEND_API_KEY, los mensajes se imprimen en este log en vez de enviarse.");
+  if (!process.env.SESSION_SECRET) {
+    console.warn("Aviso: SESSION_SECRET no definido; se generó uno temporal (las sesiones caducan al reiniciar).");
+  }
 });
