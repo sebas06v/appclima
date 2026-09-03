@@ -1,7 +1,8 @@
 # ⛅ AppClima
 
 Aplicación de clima que consume la [API de Open-Meteo](https://open-meteo.com/en/docs),
-con **registro e inicio de sesión** y **correo de bienvenida automático**.
+con **registro e inicio de sesión** (contraseña o **cuenta de Google**) y **correo de
+bienvenida automático**.
 
 El usuario puede introducir latitud y longitud, buscar una ubicación por nombre o usar
 la geolocalización del navegador.
@@ -12,8 +13,10 @@ directamente, así que las API keys viven únicamente en el servidor, en variabl
 ```
 navegador  →  backend (server.js)  →  Open-Meteo      (clima)
                     │                └─ OPEN_METEO_API_KEY
-                    └──────────────→  Resend          (correo de bienvenida)
-                                      └─ RESEND_API_KEY
+                    ├──────────────→  Resend          (correo de bienvenida)
+                    │                 └─ RESEND_API_KEY
+                    └──────────────→  Google OAuth    (acceso con Google)
+                                      └─ GOOGLE_CLIENT_SECRET
 ```
 
 ## Cómo ejecutarla
@@ -35,6 +38,9 @@ Sin dependencias externas: solo Node.js (>= 20.12, por `process.loadEnvFile`).
 | `/api/login` | POST | Inicia sesión. |
 | `/api/logout` | POST | Cierra la sesión. |
 | `/api/sesion` | GET | Devuelve el usuario de la sesión actual. |
+| `/api/config` | GET | Indica al frontend si el acceso con Google está disponible. |
+| `/api/auth/google` | GET | Inicia el flujo de OAuth: redirige a Google. |
+| `/api/auth/google/callback` | GET | Recibe el código de Google, abre la sesión y **registra la cuenta si es nueva**. |
 
 Los endpoints del clima (`/api/clima`, `/api/geocode`) **exigen sesión**: sin ella devuelven
 401 y el frontend redirige a `/login.html`.
@@ -53,6 +59,46 @@ Decisiones de seguridad, todas con módulos nativos de Node:
 
 Los usuarios se guardan en `data/usuarios.json`, que está en `.gitignore`.
 Para producción esto se sustituiría por una base de datos real.
+
+## Acceso con Google (OAuth 2.0)
+
+Flujo de **código de autorización**, entero en el servidor: el navegador nunca ve el
+`GOOGLE_CLIENT_SECRET`. Implementado en `google.js`, sin dependencias.
+
+1. El usuario pulsa **Continuar con Google** → `GET /api/auth/google`.
+2. El servidor genera un `state` aleatorio de 32 bytes, lo guarda en una cookie `httpOnly`
+   de 10 minutos y redirige a Google.
+3. Google devuelve el control a `/api/auth/google/callback`. Se comprueba que el `state`
+   recibido coincida con el de la cookie (protección CSRF).
+4. El código se canjea por un `id_token` en `oauth2.googleapis.com/token`, usando el
+   client secret. Del token se leen `sub`, `email` y `name`, y se verifica que el `aud`
+   sea esta aplicación y que no haya caducado.
+5. Si el correo ya existe se entra y se asocia el `googleId`; si no, **se crea la cuenta y
+   se dispara el correo de bienvenida**, igual que en el registro con contraseña.
+
+Detalles:
+
+- Las cuentas creadas con Google **no tienen contraseña** (`password: null`). Si alguien
+  intenta entrar con contraseña en una de ellas, recibe un 409 `USAR_GOOGLE` que le indica
+  usar el botón. Nunca pueden validar con contraseña vacía.
+- Los errores del flujo (cancelación, `state` inválido, fallo de Google) **no devuelven JSON
+  crudo**: redirigen a `/login.html?error=…` y la pantalla de acceso muestra el mensaje.
+- Si faltan las credenciales, `/api/config` devuelve `{"google": false}`, el botón no se
+  muestra y la app sigue funcionando con contraseña.
+
+### Configurar las credenciales
+
+En [Google Cloud Console](https://console.cloud.google.com/apis/credentials), dentro de tu
+proyecto: **Crear credenciales → ID de cliente de OAuth → Aplicación web**, y registra como
+**URI de redireccionamiento autorizado** exactamente:
+
+```
+http://localhost:3000/api/auth/google/callback
+```
+
+Copia el *Client ID* y el *Client secret* a `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET`
+en tu `.env`. Mientras la app esté en modo de prueba, solo podrán entrar las cuentas
+añadidas como usuarios de prueba en la pantalla de consentimiento.
 
 ## Correo de bienvenida
 
@@ -84,6 +130,9 @@ La plantilla versionada es `.env.example`.
 
 | Variable | Por defecto | Descripción |
 |---|---|---|
+| `GOOGLE_CLIENT_ID` | *(vacía)* | ID de cliente de OAuth. Sin él, el botón de Google se oculta. |
+| `GOOGLE_CLIENT_SECRET` | *(vacía)* | Secreto de cliente de OAuth. Solo vive en el servidor. |
+| `GOOGLE_REDIRECT_URI` | `http://localhost:3000/api/auth/google/callback` | Debe coincidir exactamente con el registrado en Google Cloud. |
 | `RESEND_API_KEY` | *(vacía)* | API key de Resend. Sin ella los correos se imprimen en el log. |
 | `MAIL_FROM` | `AppClima <onboarding@resend.dev>` | Remitente del correo de bienvenida. |
 | `APP_URL` | `http://localhost:3000` | URL usada en los enlaces del correo. |
@@ -127,6 +176,7 @@ Ambos validan la entrada, aplican caché y devuelven los errores con la forma:
 | Datos de registro inválidos | 400 | `DATOS_INVALIDOS` |
 | Correo ya registrado | 409 | `EMAIL_DUPLICADO` |
 | Credenciales incorrectas | 401 | `CREDENCIALES` |
+| Contraseña en una cuenta de Google | 409 | `USAR_GOOGLE` |
 | Sin sesión activa | 401 | `NO_AUTENTICADO` |
 | Demasiados intentos de acceso | 429 | `BLOQUEADO` |
 | `lat`/`lon` no numéricos o ausentes | 400 | `PARAMETRO_INVALIDO` |
@@ -169,6 +219,7 @@ Ambos validan la entrada, aplican caché y devuelven los errores con la forma:
 | `styles.css` | estilos de ambas pantallas |
 | `server.js` | rutas, proxy a Open-Meteo, caché y errores |
 | `auth.js` | usuarios, contraseñas y sesiones |
+| `google.js` | acceso con Google (OAuth 2.0) |
 | `correo.js` | proveedor de correo y plantilla de bienvenida |
 | `.env.example` | plantilla de variables de ambiente |
 

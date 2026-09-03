@@ -114,7 +114,21 @@ formRegistro.addEventListener("submit", async (ev) => {
 
 /* ---------- Arranque ---------- */
 
+// Errores que vuelven del flujo de Google, en ?error=…
+const errorUrl = new URLSearchParams(window.location.search).get("error");
+if (errorUrl) {
+  mostrarEstado(errorUrl, true);
+  // Se limpia la URL para que el error no reaparezca al recargar.
+  window.history.replaceState({}, "", window.location.pathname);
+}
+
 // Si ya hay sesión activa, no tiene sentido mostrar esta pantalla.
 fetch("/api/sesion")
   .then((r) => { if (r.ok) window.location.replace("/"); })
   .catch(() => { /* sin conexión: se queda en el formulario */ });
+
+// El botón de Google solo aparece si el servidor tiene credenciales configuradas.
+fetch("/api/config")
+  .then((r) => r.json())
+  .then((c) => { if (c.google) $("bloque-google").hidden = false; })
+  .catch(() => { /* sin conexión: se queda solo el acceso con contraseña */ });

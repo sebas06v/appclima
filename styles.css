@@ -266,3 +266,22 @@ body.comprobando-sesion .foot { visibility: hidden; }
 
 .pagina-auth .status { margin-bottom: 1rem; }
 .pagina-auth .foot { padding: 0; }
+
+/* ---------- Acceso con Google ---------- */
+.btn-google {
+  display: flex; align-items: center; justify-content: center; gap: 0.6rem;
+  width: 100%; padding: 0.7rem 1.1rem;
+  border-radius: 12px; border: 1px solid var(--panel-border);
+  background: #ffffff; color: #1f2328;
+  font-size: 0.95rem; font-weight: 600; text-decoration: none;
+}
+.btn-google:hover { background: #f1f3f5; }
+.btn-google svg { flex: 0 0 auto; }
+
+.separador {
+  display: flex; align-items: center; gap: 0.75rem;
+  margin: 1.25rem 0; color: var(--muted); font-size: 0.8rem;
+}
+.separador::before, .separador::after {
+  content: ""; flex: 1; height: 1px; background: var(--panel-border);
+}

@@ -47,6 +47,8 @@ function hashPassword(password) {
 }
 
 function verificarPassword(password, guardado) {
+  // Las cuentas creadas con Google no tienen contraseña: nunca deben validar.
+  if (!guardado) return false;
   try {
     const [saltHex, hashHex] = String(guardado).split(":");
     const hash = crypto.scryptSync(password, Buffer.from(saltHex, "hex"), 64);
@@ -75,13 +77,16 @@ function buscarPorEmail(email) {
   return cargar().get(String(email || "").trim().toLowerCase()) || null;
 }
 
-async function crearUsuario({ nombre, email, password }) {
+async function crearUsuario({ nombre, email, password, proveedor = "local", googleId = null }) {
   const correo = String(email).trim().toLowerCase();
   const usuario = {
     id: crypto.randomUUID(),
     nombre: String(nombre).trim(),
     email: correo,
-    password: hashPassword(password),
+    // Las cuentas de Google no tienen contraseña.
+    password: password ? hashPassword(password) : null,
+    proveedor,
+    googleId,
     creado: new Date().toISOString(),
   };
   cargar().set(correo, usuario);
@@ -89,9 +94,17 @@ async function crearUsuario({ nombre, email, password }) {
   return usuario;
 }
 
+/** Asocia una cuenta ya existente (creada con contraseña) a su Google. */
+async function vincularGoogle(usuario, googleId) {
+  if (usuario.googleId === googleId) return usuario;
+  usuario.googleId = googleId;
+  await persistir();
+  return usuario;
+}
+
 /** Datos del usuario seguros para enviar al navegador (sin el hash). */
 function publico(u) {
-  return { id: u.id, nombre: u.nombre, email: u.email, creado: u.creado };
+  return { id: u.id, nombre: u.nombre, email: u.email, proveedor: u.proveedor || "local", creado: u.creado };
 }
 
 /* ---------- Sesiones (cookie firmada) ---------- */
@@ -139,10 +152,14 @@ function usuarioDePeticion(req) {
   return verificarSesion(leerCookies(req.headers.cookie).sesion);
 }
 
-function cookieSesion(valor, maxEdadSeg) {
-  const partes = [`sesion=${valor}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${maxEdadSeg}`];
+function cookie(nombre, valor, maxEdadSeg) {
+  const partes = [`${nombre}=${valor}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${maxEdadSeg}`];
   if (process.env.COOKIE_SECURE === "true") partes.push("Secure");
   return partes.join("; ");
+}
+
+function cookieSesion(valor, maxEdadSeg) {
+  return cookie("sesion", valor, maxEdadSeg);
 }
 
 /* ---------- Límite de intentos de acceso ---------- */
@@ -168,8 +185,8 @@ function limpiarIntentos(clave) {
 }
 
 module.exports = {
-  validarRegistro, buscarPorEmail, crearUsuario, verificarPassword, publico,
-  crearSesion, usuarioDePeticion, cookieSesion,
+  validarRegistro, buscarPorEmail, crearUsuario, vincularGoogle, verificarPassword, publico,
+  crearSesion, usuarioDePeticion, cookieSesion, cookie, leerCookies,
   bloqueado, registrarFallo, limpiarIntentos,
   DURACION_SESION_MS,
 };

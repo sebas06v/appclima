@@ -10,8 +10,10 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const auth = require("./auth");
 const correo = require("./correo");
+const google = require("./google");
 
 /* ---------- Variables de ambiente ---------- */
 // Carga .env si existe (Node >= 20.12). La app funciona igual sin el archivo.
@@ -194,6 +196,12 @@ async function rutaLogin(req, res) {
   }
 
   const usuario = auth.buscarPorEmail(email);
+
+  // Cuenta creada con Google: no tiene contraseña que comprobar.
+  if (usuario && !usuario.password) {
+    throw new ErrorAPI('Esta cuenta se creó con Google. Usa el botón "Continuar con Google".', "USAR_GOOGLE", 409);
+  }
+
   // Mensaje idéntico exista o no la cuenta: no se revela qué correos están registrados.
   if (!usuario || !auth.verificarPassword(String(cuerpo.password || ""), usuario.password)) {
     auth.registrarFallo(clave);
@@ -213,6 +221,87 @@ function rutaSesion(req, res) {
   const usuario = auth.usuarioDePeticion(req);
   if (!usuario) throw new ErrorAPI("No hay sesión activa.", "NO_AUTENTICADO", 401);
   enviarJSON(res, 200, { usuario: auth.publico(usuario) });
+}
+
+/* ---------- Endpoints: acceso con Google (OAuth 2.0) ---------- */
+
+function redirigir(res, destino, cookies = null) {
+  const cabeceras = { Location: destino };
+  if (cookies) cabeceras["Set-Cookie"] = cookies;
+  res.writeHead(302, cabeceras);
+  res.end();
+}
+
+/** Los errores de OAuth vuelven a la pantalla de acceso, no en JSON crudo. */
+function redirigirLogin(res, mensaje) {
+  redirigir(res, `/login.html?error=${encodeURIComponent(mensaje)}`, auth.cookie("oauth_estado", "", 0));
+}
+
+/** Paso 1: manda al usuario a Google con un "state" contra CSRF. */
+function rutaGoogleInicio(req, res) {
+  if (!google.configurado()) {
+    return redirigirLogin(res, "El acceso con Google no está configurado en el servidor.");
+  }
+  const estado = crypto.randomBytes(32).toString("hex");
+  redirigir(res, google.urlAutorizacion(estado), auth.cookie("oauth_estado", estado, 600));
+}
+
+/** Paso 2: Google devuelve el código; se canjea y se abre la sesión. */
+async function rutaGoogleCallback(req, url, res) {
+  const errorGoogle = url.searchParams.get("error");
+  if (errorGoogle) {
+    return redirigirLogin(res, errorGoogle === "access_denied"
+      ? "Cancelaste el acceso con Google."
+      : `Google devolvió un error: ${errorGoogle}`);
+  }
+
+  // El "state" recibido debe coincidir con el que guardamos en la cookie.
+  const estadoRecibido = url.searchParams.get("state");
+  const estadoCookie = auth.leerCookies(req.headers.cookie).oauth_estado;
+  if (!estadoRecibido || !estadoCookie || estadoRecibido !== estadoCookie) {
+    return redirigirLogin(res, "La verificación de seguridad con Google falló. Inténtalo de nuevo.");
+  }
+
+  const codigo = url.searchParams.get("code");
+  if (!codigo) return redirigirLogin(res, "Google no devolvió el código de autorización.");
+
+  let perfil;
+  try {
+    perfil = await google.intercambiarCodigo(codigo);
+  } catch (e) {
+    return redirigirLogin(res, e.message);
+  }
+
+  // ¿Ya existía esa cuenta? Si sí, se entra; si no, es un registro nuevo.
+  let usuario = auth.buscarPorEmail(perfil.email);
+  const esRegistroNuevo = !usuario;
+
+  if (usuario) {
+    await auth.vincularGoogle(usuario, perfil.googleId);
+  } else {
+    usuario = await auth.crearUsuario({
+      nombre: perfil.nombre,
+      email: perfil.email,
+      proveedor: "google",
+      googleId: perfil.googleId,
+    });
+  }
+
+  redirigir(res, "/", [
+    auth.cookieSesion(auth.crearSesion(usuario), auth.DURACION_SESION_MS / 1000),
+    auth.cookie("oauth_estado", "", 0),
+  ]);
+
+  // Mismo criterio que el registro con contraseña: el correo de bienvenida sale
+  // después de responder, sin await, y SOLO la primera vez que entra la cuenta.
+  if (esRegistroNuevo) {
+    setImmediate(() => { correo.enviarBienvenida(auth.publico(usuario)); });
+  }
+}
+
+/** Le dice al frontend qué métodos de acceso están disponibles. */
+function rutaConfig(res) {
+  enviarJSON(res, 200, { google: google.configurado() });
 }
 
 /* ---------- Endpoints: clima ---------- */
@@ -292,6 +381,9 @@ const RUTAS = {
   "/api/login": "POST",
   "/api/logout": "POST",
   "/api/sesion": "GET",
+  "/api/config": "GET",
+  "/api/auth/google": "GET",
+  "/api/auth/google/callback": "GET",
   "/api/clima": "GET",
   "/api/geocode": "GET",
 };
@@ -311,6 +403,9 @@ http.createServer(async (req, res) => {
         case "/api/login":    return await rutaLogin(req, res);
         case "/api/logout":   return rutaLogout(res);
         case "/api/sesion":   return rutaSesion(req, res);
+        case "/api/config":   return rutaConfig(res);
+        case "/api/auth/google":          return rutaGoogleInicio(req, res);
+        case "/api/auth/google/callback": return await rutaGoogleCallback(req, url, res);
         // El clima queda detrás del login.
         case "/api/clima":    exigirSesion(req); return await rutaClima(url.searchParams, res);
         case "/api/geocode":  exigirSesion(req); return await rutaGeocode(url.searchParams, res);
@@ -328,6 +423,9 @@ http.createServer(async (req, res) => {
   console.log(correo.proveedor() === "resend"
     ? `Correo: Resend activo, remitente ${process.env.MAIL_FROM || "AppClima <onboarding@resend.dev>"}.`
     : "Correo: sin RESEND_API_KEY, los mensajes se imprimen en este log en vez de enviarse.");
+  console.log(google.configurado()
+    ? "Google: acceso con Google activo."
+    : "Google: sin GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET, el botón de Google queda oculto.");
   if (!process.env.SESSION_SECRET) {
     console.warn("Aviso: SESSION_SECRET no definido; se generó uno temporal (las sesiones caducan al reiniciar).");
   }
